@@ -1,8 +1,7 @@
-name: Maven Docker Build
-
+name: Prompts-ai
 on:
   push:
-    branches: [ main ]
+    branches: [ MVN-dummy ]
   workflow_dispatch:
 
 permissions:
@@ -12,22 +11,21 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: maven:3.9.6-eclipse-temurin-17-alpine
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      # Maven build with log capture (upload even on failure)
       - name: Build Maven Project (capture logs)
         id: mvn_build
         continue-on-error: true
         run: |
           set -o pipefail
           mvn -B clean compile package -DskipTests 2>&1 | tee maven.log
-          echo "${PIPESTATUS[0]}" > .mvn_exit_code
+          EXIT_CODE=$?
+          echo "Maven exit code: $EXIT_CODE"
+          echo "$EXIT_CODE" > .mvn_exit_code
 
       - name: Upload Maven build log
         if: always()
@@ -38,16 +36,33 @@ jobs:
 
       - name: Fail if Maven build failed
         run: |
-          test "$(cat .mvn_exit_code)" -eq 0
+          EXIT_CODE=$(cat .mvn_exit_code)
+          echo "Maven exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "❌ Maven build FAILED"
+            exit 1
+          fi
+          echo "✅ Maven build SUCCEEDED"
 
-      # Docker build with log capture (upload even on failure)
+  docker-build:
+    needs: build
+    runs-on: eks-edopsclt-custom-runner
+    if: success()
+
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Build Docker Image (capture logs)
         id: docker_build
         continue-on-error: true
         run: |
           set -o pipefail
-          docker build -t demo-app:${{ github.run_number }} . 2>&1 | tee dockerbuild.log
-          echo "${PIPESTATUS[0]}" > .docker_exit_code
+          docker build -t demo-app:${{ github.run_number }} \
+            -t demo-app:latest \
+            . 2>&1 | tee dockerbuild.log
+          EXIT_CODE=$?
+          echo "Docker exit code: $EXIT_CODE"
+          echo "$EXIT_CODE" > .docker_exit_code
 
       - name: Upload Docker build log
         if: always()
@@ -58,17 +73,27 @@ jobs:
 
       - name: Fail if Docker build failed
         run: |
-          test "$(cat .docker_exit_code)" -eq 0
+          EXIT_CODE=$(cat .docker_exit_code)
+          echo "Docker exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "❌ Docker build FAILED"
+            exit 1
+          fi
+          echo "✅ Docker build SUCCEEDED"
+          docker images | grep demo-app || true
 
   analyze-failure-with-copilot:
-    needs: build
+    needs: [build, docker-build]
     if: failure()
-    runs-on: ubuntu-latest
+    runs-on: eks-edopsclt-custom-runner
+
     env:
-      # IMPORTANT: Set both so gh is happy in CI and Copilot CLI uses the same token
       GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download Maven build log
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -87,6 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           LOGFILE="ci-logs.txt"
+
           if ls logs/*.log >/dev/null 2>&1; then
             (
               for f in logs/*.log; do
@@ -100,58 +126,80 @@ jobs:
           else
             echo "No logs found" > "$LOGFILE"
           fi
-          echo "----- CI logs (head) -----"
+
+          echo "----- CI logs (first 200 lines) -----"
           head -n 200 "$LOGFILE" || true
 
-      # Install the NEW standalone GitHub Copilot CLI (not the gh extension)
       - name: Install Copilot CLI
         run: |
           set -euo pipefail
-          # Ensure Node is available for npm (ubuntu-latest has node, but upgrade if needed)
+          export XDG_CONFIG_HOME=/tmp/copilot-config
+          mkdir -p /tmp/copilot-config
+
           if ! command -v node >/dev/null 2>&1; then
             curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
             sudo apt-get install -y nodejs
           fi
-          npm i -g @github/copilot
-          # Put the npm global bin on PATH for this shell
-          echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
-          # Basic sanity check
-          copilot --version || (echo "Copilot CLI not found on PATH" && exit 1)
 
-      # (Optional) Install gh for summaries; not required by Copilot CLI itself
-      - name: Install GitHub CLI (optional)
+          mkdir -p ~/.npm-global
+          npm config set prefix '~/.npm-global'
+          npm install -g @github/copilot
+
+          NPM_BIN="$HOME/.npm-global/bin"
+          if [ -f "$NPM_BIN/copilot" ]; then
+            echo "✅ Copilot CLI installed successfully"
+            echo "$NPM_BIN" >> $GITHUB_PATH
+            "$NPM_BIN/copilot" --version
+          else
+            echo "❌ ERROR: Copilot CLI not found"
+            exit 1
+          fi
+
+      - name: Install GitHub CLI
         run: |
-          set -euo pipefail
           if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get update -y && sudo apt-get install -y gh
+            sudo apt-get update -y
+            sudo apt-get install -y gh
           fi
           gh --version || true
-          # gh uses GH_TOKEN automatically in Actions
-          gh auth status || true
 
-      - name: Analyze failure with Copilot (actionable fixes)
+      - name: Analyze failure with Copilot (using repo prompt)
         run: |
           set -euo pipefail
-          echo "===== GitHub Copilot CLI: Analyzing CI failure (Maven/Docker) ====="
-          # Use the standalone 'copilot' command (NOT 'gh copilot')
-          copilot -p "You are a senior Java and DevOps engineer. Read these CI logs and:
-          - Identify which stage(s) failed: Maven build/package or Docker build.
-          - Quote the exact error lines and a few surrounding lines for context.
-          - Provide precise fixes with code snippets: e.g., pom.xml (maven-compiler/surefire), dependency or plugin versions, JDK alignment; Dockerfile corrections (FROM base image, COPY paths, RUN syntax).
-          - For repository/proxy/TLS issues, give concrete ~/.m2/settings.xml mirror/proxy snippets and mvn flags; mention Nexus/Artifactory mirrors if relevant.
-          - For dependency conflicts, show dependencyManagement or plugin version enforcement with examples.
-          - End with a short, numbered remediation checklist for local and CI.
-          Return clear, concise, copy-pasteable changes." < ci-logs.txt
+          export XDG_CONFIG_HOME=/tmp/copilot-config
 
-      - name: Save Copilot analysis (artifact + summary)
+          echo "===== GitHub Copilot CLI: Analyzing CI failure ====="
+
+          {
+            cat .github/gh_copilot_prompts/copilot_ci_cd_error_analysis_prompts.md
+            echo ""
+            echo "================ CI LOGS ================"
+            cat ci-logs.txt
+          } > copilot-input.txt
+
+          copilot < copilot-input.txt
+
+      - name: Save analysis report
         run: |
           set -euo pipefail
-          copilot -p "Summarize root cause(s), quote key error lines, and propose exact fixes with code snippets (pom.xml, Dockerfile, settings.xml). Finish with a step-by-step checklist for local and CI." < ci-logs.txt > copilot-analysis.md
-          echo "## Copilot Failure Analysis (excerpt)" >> $GITHUB_STEP_SUMMARY
-          head -n 200 copilot-analysis.md >> $GITHUB_STEP_SUMMARY || true
+          export XDG_CONFIG_HOME=/tmp/copilot-config
 
-      - name: Upload Copilot analysis
+          {
+            cat .github/gh_copilot_prompts/copilot_ci_cd_error_analysis_prompts.md
+            echo ""
+            echo "================ CI LOGS ================"
+            cat ci-logs.txt
+          } > copilot-input.txt
+
+          copilot < copilot-input.txt > copilot-analysis.md
+
+          echo "## Copilot Failure Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          head -n 150 copilot-analysis.md >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Upload analysis report
         uses: actions/upload-artifact@v4
         with:
           name: copilot-analysis
           path: copilot-analysis.md
+          retention-days: 14
