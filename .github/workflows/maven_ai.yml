@@ -204,7 +204,7 @@ jobs:
 
   email-notification:
     # Use your custom runner if required; otherwise ubuntu-latest is fine.
-    runs-on: eks-edopsclt-custom-runner
+    runs-on: ubuntu-latest
     needs: [build, docker-build, analyze-failure-with-copilot]
     if: always()
     steps:
