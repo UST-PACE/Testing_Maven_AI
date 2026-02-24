@@ -287,7 +287,7 @@ jobs:
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
-          server_port: ${{ secrets.MAIL_SERVER_PORT }}
+          server_port: 587
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: '[GitHub Actions] Workflow ${{ github.workflow }} (branch ${{ github.ref_name }}) - ${{ steps.check_status.outputs.EMAIL_SUBJECT_STATUS }}'
