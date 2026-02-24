@@ -46,7 +46,7 @@ jobs:
 
   docker-build:
     needs: build
-    runs-on: eks-edopsclt-custom-runner
+    runs-on: ubuntu-latest
     if: success()
 
     steps:
@@ -85,7 +85,7 @@ jobs:
   analyze-failure-with-copilot:
     needs: [build, docker-build]
     if: failure()
-    runs-on: eks-edopsclt-custom-runner
+    runs-on: ubuntu-latest
 
     env:
       GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
