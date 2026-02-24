@@ -1,7 +1,7 @@
 name: Prompts-ai
 on:
   push:
-    branches: [ MVN-dummy ]
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
