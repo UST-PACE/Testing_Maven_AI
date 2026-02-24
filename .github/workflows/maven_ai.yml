@@ -282,29 +282,19 @@ jobs:
             cat attachments_list.txt || true
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Send email notification
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
-          server_port: 587
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
-          subject: '[GitHub Actions] Workflow ${{ github.workflow }} (branch ${{ github.ref_name }}) - ${{ steps.check_status.outputs.EMAIL_SUBJECT_STATUS }}'
-          to: ${{ steps.determine_recipient.outputs.email_to }}
-          from: GitHub Actions <no-reply@edge-ops.io>
-          secure: true
-          body: |
-            Workflow: ${{ github.workflow }}
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Build Job Status: ${{ needs.build.result }}
-            Docker Build Job Status: ${{ needs.docker-build.result }}
-            Failure Analysis Job Status: ${{ needs.analyze-failure-with-copilot.result }}
-            Overall Workflow Status: ${{ steps.check_status.outputs.WORKFLOW_STATUS }}
-            Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-            Notes:
-            - If the run failed, see the attached 'copilot-analysis.md'.
-            - Build logs are attached when available.
-          attachments: ${{ steps.collect_attachments.outputs.attachments }}
+          
+                     - name: Send email notification
+                       uses: dawidd6/action-send-mail@v3
+                       with:
+                  server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
+                  server_port: 587
+                  secure: false
+                  starttls: true
+                  username: ${{ secrets.MAIL_USERNAME }}
+                  password: ${{ secrets.MAIL_PASSWORD }}
+                  to: ${{ steps.determine_recipient.outputs.email_to }}
+                  from: GitHub Actions <no-reply@edge-ops.io>
+                  subject: '[GitHub Actions] Workflow ${{ github.workflow }} (branch ${{ github.ref_name }}) - ${{ steps.check_status.outputs.EMAIL_SUBJECT_STATUS }}'
+                  body: |
+                    ...
+                  attachments: ${{ steps.collect_attachments.outputs.attachments }}
