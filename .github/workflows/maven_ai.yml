@@ -288,7 +288,7 @@ jobs:
 
   # 1. Notify the approver that a deployment is pending
   notify-for-approval:
-    needs: docker-build
+    needs: build
     if: success() # Only notify if the build and docker jobs passed
     runs-on: ubuntu-latest
     steps:
