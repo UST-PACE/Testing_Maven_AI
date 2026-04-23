@@ -283,6 +283,47 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+
+        
+
+  # 1. Notify the approver that a deployment is pending
+  notify-for-approval:
+    needs: docker-build
+    if: success() # Only notify if the build and docker jobs passed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Approval Request Email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
+          server_port: 587
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          to: Sai.Karthik@ust.com
+          from: GitHub Actions <no-reply@edge-ops.io>
+          subject: "Manual Approval Needed: Deploying ${{ github.repository }} to Production"
+          body: |
+            The build for run #${{ github.run_number }} was successful.
+            Please approve the deployment to Production here:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # 2. The Environment Gate + Deployment
+  deploy-to-production:
+    needs: notify-for-approval
+    runs-on: ubuntu-latest
+    environment: Production  # <--- THIS IS THE GATE. GitHub pauses here.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Container (Example)
+        run: |
+          echo "🚀 Starting Deployment to Production..."
+          # Example: Deploying via SSH or Kubernetes
+          # docker pull demo-app:${{ github.run_number }}
+          # docker stop my-app || true
+          # docker run -d --name my-app demo-app:${{ github.run_number }}
+          echo "✅ Deployment Successful"
+
       - name: Send email notification
         uses: dawidd6/action-send-mail@v3
         with:
