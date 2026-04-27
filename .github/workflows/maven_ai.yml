@@ -1,5 +1,4 @@
 name: Prompts-ai
-
 on:
   push:
     branches: [ main ]
@@ -7,14 +6,11 @@ on:
 
 permissions:
   contents: read
-  actions: write   # required to cancel the workflow via API
+  actions: write   # needed for upload/download-artifact
 
 jobs:
-  # =========================================================
-  # BUILD JOB
-  # =========================================================
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest 
     container:
       image: maven:3.9.6-eclipse-temurin-17-alpine
     steps:
@@ -25,8 +21,10 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          mvn -B clean package -DskipTests 2>&1 | tee maven.log
-          echo $? > .mvn_exit_code
+          mvn -B clean compile package -DskipTests 2>&1 | tee maven.log
+          EXIT_CODE=$?
+          echo "Maven exit code: $EXIT_CODE"
+          echo "$EXIT_CODE" > .mvn_exit_code
 
       - name: Upload Maven build log
         if: always()
@@ -38,15 +36,14 @@ jobs:
 
       - name: Fail if Maven build failed
         run: |
-          if [ "$(cat .mvn_exit_code)" -ne 0 ]; then
-            echo "❌ Maven build failed"
+          EXIT_CODE=$(cat .mvn_exit_code)
+          echo "Maven exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "❌ Maven build FAILED"
             exit 1
           fi
-          echo "✅ Maven build succeeded"
+          echo "✅ Maven build SUCCEEDED"
 
-  # =========================================================
-  # DOCKER BUILD
-  # =========================================================
   docker-build:
     needs: build
     runs-on: ubuntu-latest
@@ -55,13 +52,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker Image (capture logs)
+        id: docker_build
         continue-on-error: true
         run: |
           set -o pipefail
           docker build -t demo-app:${{ github.run_number }} \
                        -t demo-app:latest \
                        . 2>&1 | tee dockerbuild.log
-          echo $? > .docker_exit_code
+          EXIT_CODE=$?
+          echo "Docker exit code: $EXIT_CODE"
+          echo "$EXIT_CODE" > .docker_exit_code
 
       - name: Upload Docker build log
         if: always()
@@ -73,43 +73,223 @@ jobs:
 
       - name: Fail if Docker build failed
         run: |
-          if [ "$(cat .docker_exit_code)" -ne 0 ]; then
-            echo "❌ Docker build failed"
+          EXIT_CODE=$(cat .docker_exit_code)
+          echo "Docker exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "❌ Docker build FAILED"
             exit 1
           fi
-          echo "✅ Docker build succeeded"
+          echo "✅ Docker build SUCCEEDED"
+          docker images | grep demo-app || true
 
-  # =========================================================
-  # FAILURE ANALYSIS (COPILOT)
-  # =========================================================
   analyze-failure-with-copilot:
     needs: [build, docker-build]
     if: failure()
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+
+      - name: Download Maven build log
+        uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          path: logs
-      - run: |
-          cat logs/*/*.log > ci-logs.txt || echo "No logs" > ci-logs.txt
-      - name: Analyze with Copilot
+          name: maven-build-log
+          path: logs/
+
+      - name: Download Docker build log
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: docker-build-log
+          path: logs/
+
+      - name: Prepare consolidated log
         run: |
-          copilot < ci-logs.txt > copilot-analysis.md || true
-      - uses: actions/upload-artifact@v4
+          set -euo pipefail
+          LOGFILE="ci-logs.txt"
+
+          if ls logs/*.log >/dev/null 2>&1; then
+            (
+              for f in logs/*.log; do
+                echo "===================="
+                echo "FILE: $f"
+                echo "===================="
+                cat "$f"
+                echo
+              done
+            ) > "$LOGFILE"
+          else
+            echo "No logs found" > "$LOGFILE"
+          fi
+
+          echo "----- CI logs (first 200 lines) -----"
+          head -n 200 "$LOGFILE" || true
+
+      - name: Install Copilot CLI
+        run: |
+          set -euo pipefail
+          export XDG_CONFIG_HOME=/tmp/copilot-config
+          mkdir -p /tmp/copilot-config
+
+          if ! command -v node >/dev/null 2>&1; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+          fi
+
+          mkdir -p ~/.npm-global
+          npm config set prefix '~/.npm-global'
+          npm install -g @github/copilot
+
+          NPM_BIN="$HOME/.npm-global/bin"
+          if [ -f "$NPM_BIN/copilot" ]; then
+            echo "✅ Copilot CLI installed successfully"
+            echo "$NPM_BIN" >> $GITHUB_PATH
+            "$NPM_BIN/copilot" --version
+          else
+            echo "❌ ERROR: Copilot CLI not found"
+            exit 1
+          fi
+
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y gh
+          fi
+          gh --version || true
+
+      - name: Analyze failure with Copilot (using repo prompt)
+        run: |
+          set -euo pipefail
+          export XDG_CONFIG_HOME=/tmp/copilot-config
+
+          echo "===== GitHub Copilot CLI: Analyzing CI failure ====="
+
+          {
+            cat .github/gh_copilot_prompts/copilot_ci_cd_error_analysis_prompts.md
+            echo ""
+            echo "================ CI LOGS ================"
+            cat ci-logs.txt
+          } > copilot-input.txt
+
+          copilot < copilot-input.txt
+
+      - name: Save analysis report
+        run: |
+          set -euo pipefail
+          export XDG_CONFIG_HOME=/tmp/copilot-config
+
+          {
+            cat .github/gh_copilot_prompts/copilot_ci_cd_error_analysis_prompts.md
+            echo ""
+            echo "================ CI LOGS ================"
+            cat ci-logs.txt
+          } > copilot-input.txt
+
+          copilot < copilot-input.txt > copilot-analysis.md
+
+          echo "## Copilot Failure Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          head -n 150 copilot-analysis.md >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Upload analysis report
+        uses: actions/upload-artifact@v4
         with:
           name: copilot-analysis
           path: copilot-analysis.md
+          retention-days: 14
 
-  # =========================================================
-  # NOTIFY APPROVER
-  # =========================================================
+  email-notification:
+    runs-on: ubuntu-latest
+    needs: [build, docker-build, analyze-failure-with-copilot]
+    if: always()
+    steps:
+      - name: Download Copilot analysis report (if exists)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: copilot-analysis
+          path: .
+
+      - name: Download Maven build log (if exists)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: maven-build-log
+          path: logs/
+
+      - name: Download Docker build log (if exists)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: docker-build-log
+          path: logs/
+
+      - name: Determine Workflow Status
+        id: check_status
+        run: |
+          set -euo pipefail
+          BUILD_STATUS="${{ needs.build.result }}"
+          DOCKER_STATUS="${{ needs.docker-build.result }}"
+          ANALYZE_STATUS="${{ needs.analyze-failure-with-copilot.result }}"
+
+          if [[ "$BUILD_STATUS" == "failure" || "$DOCKER_STATUS" == "failure" || "$ANALYZE_STATUS" == "failure" ]]; then
+            echo "WORKFLOW_STATUS=failure" >> $GITHUB_OUTPUT
+            echo "EMAIL_SUBJECT_STATUS=failed" >> $GITHUB_OUTPUT
+          else
+            echo "WORKFLOW_STATUS=success" >> $GITHUB_OUTPUT
+            echo "EMAIL_SUBJECT_STATUS=succeeded" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine Email Recipient
+        id: determine_recipient
+        run: |
+          set -euo pipefail
+          RECIPIENT=""
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            if [[ -n "${{ github.event.pusher.email }}" ]]; then
+              RECIPIENT="${{ github.event.pusher.email }}"
+            fi
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ -n "${{ github.event.pull_request.user.email }}" ]]; then
+              RECIPIENT="${{ github.event.pull_request.user.email }}"
+            fi
+          fi
+          if [[ -z "$RECIPIENT" ]]; then
+            RECIPIENT="${{ secrets.MAIL_RECIPIENT }}"
+          fi
+          echo "email_to=$RECIPIENT" >> $GITHUB_OUTPUT
+
+      - name: Collect attachments list
+        id: collect_attachments
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=()
+          [[ -f copilot-analysis.md ]] && files+=("copilot-analysis.md")
+          [[ -f logs/maven.log ]] && files+=("logs/maven.log")
+          [[ -f logs/dockerbuild.log ]] && files+=("logs/dockerbuild.log")
+
+          printf '%s\n' "${files[@]}" > attachments_list.txt || true
+          echo "Attachments to send:"
+          cat attachments_list.txt || true
+
+          {
+            echo "attachments<<EOF"
+            cat attachments_list.txt || true
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+
+        
+
+  # 1. Notify the approver that a deployment is pending
   notify-for-approval:
-    needs: docker-build
-    if: success()
+    needs: build
+    if: success() # Only notify if the build and docker jobs passed
     runs-on: ubuntu-latest
     steps:
       - name: Send Approval Request Email
@@ -121,69 +301,54 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
           to: Sai.Karthik@ust.com
           from: GitHub Actions <no-reply@edge-ops.io>
-          subject: "Approval Required: Production Deployment"
+          subject: "Manual Approval Needed: Deploying ${{ github.repository }} to Production"
           body: |
-            Deployment is waiting for approval.
-            Run URL:
+            The build for run #${{ github.run_number }} was successful.
+            Please approve the deployment to Production here:
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-  # =========================================================
-  # PRODUCTION DEPLOYMENT (ENV GATE HERE)
-  # =========================================================
+  # 2. The Environment Gate + Deployment
   deploy-to-production:
     needs: notify-for-approval
     runs-on: ubuntu-latest
-    environment: Production
+    environment: Production  
+    # Optional: Fail the job if not approved within 2 hours
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy to Production
-        run: |
-          echo "🚀 Deploying to Production"
-          echo "✅ Deployment completed"
 
-  # =========================================================
-  # CANCEL WORKFLOW IF APPROVAL TIMED OUT
-  # =========================================================
-  cancel-workflow-on-timeout:
-    name: Cancel workflow if approval timed out
-    needs: deploy-to-production
-    if: always() && needs.deploy-to-production.result == 'cancelled'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Cancel Workflow
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Deploy to Container (Example)
         run: |
-          echo "⏰ Approval timed out. Cancelling workflow..."
-          gh api \
-            -X POST \
-            repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel
-
-  # =========================================================
-  # EMAIL NOTIFICATION (FINAL STATUS)
-  # =========================================================
-  email-notification:
-    needs:
-      - build
-      - docker-build
-      - analyze-failure-with-copilot
-      - deploy-to-production
-      - cancel-workflow-on-timeout
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Final Notification
+          echo "🚀 Starting Deployment to Production..."
+          # Example: Deploying via SSH or Kubernetes
+          # docker pull demo-app:${{ github.run_number }}
+          # docker stop my-app || true
+          # docker run -d --name my-app demo-app:${{ github.run_number }}
+          echo "✅ Deployment Successful"
+              
+      - name: Send email notification
         uses: dawidd6/action-send-mail@v3
-        with:
+        with: 
           server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
           server_port: 587
+          secure: false     # STARTTLS mode for port 587
+          starttls: true    # upgrade to TLS after EHLO
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           to: Sai.Karthik@ust.com
           from: GitHub Actions <no-reply@edge-ops.io>
-          subject: "Workflow Result: ${{ github.workflow }}"
+          subject: '[GitHub Actions] Workflow ${{ github.workflow }} (branch ${{ github.ref_name }}) - ${{ steps.check_status.outputs.EMAIL_SUBJECT_STATUS }}'
           body: |
             Workflow: ${{ github.workflow }}
-            Status: ${{ github.run_attempt }}
-            Run URL:
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Build Job Status: ${{ needs.build.result }}
+            Docker Build Job Status: ${{ needs.docker-build.result }}
+            Failure Analysis Job Status: ${{ needs.analyze-failure-with-copilot.result }}
+            Overall Workflow Status: ${{ steps.check_status.outputs.WORKFLOW_STATUS }}
+            Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Notes:
+            - If the run failed, see the attached 'copilot-analysis.md'.
+            - Build logs are attached when available.
+          attachments: ${{ steps.collect_attachments.outputs.attachments }}
