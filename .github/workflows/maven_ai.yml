@@ -311,7 +311,9 @@ jobs:
   deploy-to-production:
     needs: notify-for-approval
     runs-on: ubuntu-latest
-    environment: Production  # <--- THIS IS THE GATE. GitHub pauses here.
+    environment: Production  
+    # Optional: Fail the job if not approved within 2 hours
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
 
@@ -333,7 +335,7 @@ jobs:
           starttls: true    # upgrade to TLS after EHLO
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
-          to: ${{ steps.determine_recipient.outputs.email_to }}
+          to: Sai.Karthik@ust.com
           from: GitHub Actions <no-reply@edge-ops.io>
           subject: '[GitHub Actions] Workflow ${{ github.workflow }} (branch ${{ github.ref_name }}) - ${{ steps.check_status.outputs.EMAIL_SUBJECT_STATUS }}'
           body: |
