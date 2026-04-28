@@ -1,5 +1,4 @@
-name: Prompts-aion
-
+name: Prompts-ai
 on:
   push:
     branches: [ main ]
@@ -7,7 +6,7 @@ on:
 
 permissions:
   contents: read
-  actions: write   # Needed for artifact management and gh run cancel
+  actions: write   # needed for upload/download-artifact
 
 jobs:
   build:
@@ -16,6 +15,7 @@ jobs:
       image: maven:3.9.6-eclipse-temurin-17-alpine
     steps:
       - uses: actions/checkout@v4
+
       - name: Build Maven Project (capture logs)
         id: mvn_build
         continue-on-error: true
@@ -23,7 +23,9 @@ jobs:
           set -o pipefail
           mvn -B clean compile package -DskipTests 2>&1 | tee maven.log
           EXIT_CODE=$?
+          echo "Maven exit code: $EXIT_CODE"
           echo "$EXIT_CODE" > .mvn_exit_code
+
       - name: Upload Maven build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -31,12 +33,16 @@ jobs:
           name: maven-build-log
           path: maven.log
           retention-days: 14
+
       - name: Fail if Maven build failed
         run: |
           EXIT_CODE=$(cat .mvn_exit_code)
+          echo "Maven exit code: $EXIT_CODE"
           if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "❌ Maven build FAILED"
             exit 1
           fi
+          echo "✅ Maven build SUCCEEDED"
 
   docker-build:
     needs: build
@@ -44,14 +50,19 @@ jobs:
     if: success()
     steps:
       - uses: actions/checkout@v4
+
       - name: Build Docker Image (capture logs)
         id: docker_build
         continue-on-error: true
         run: |
           set -o pipefail
-          docker build -t demo-app:${{ github.run_number }} -t demo-app:latest . 2>&1 | tee dockerbuild.log
+          docker build -t demo-app:${{ github.run_number }} \
+                       -t demo-app:latest \
+                       . 2>&1 | tee dockerbuild.log
           EXIT_CODE=$?
+          echo "Docker exit code: $EXIT_CODE"
           echo "$EXIT_CODE" > .docker_exit_code
+
       - name: Upload Docker build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -59,33 +70,142 @@ jobs:
           name: docker-build-log
           path: dockerbuild.log
           retention-days: 14
+
       - name: Fail if Docker build failed
         run: |
           EXIT_CODE=$(cat .docker_exit_code)
+          echo "Docker exit code: $EXIT_CODE"
           if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "❌ Docker build FAILED"
             exit 1
           fi
+          echo "✅ Docker build SUCCEEDED"
+          docker images | grep demo-app || true
 
   analyze-failure-with-copilot:
-    needs: build
+    needs: [build, docker-build]
     if: failure()
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - name: Download logs and Install Copilot
-        run: |
-          # Simplified for brevity, keep your original install logic here
-          echo "Installing Copilot CLI..."
-      - name: Analyze failure
-        run: |
-          # Your original analysis logic
-          echo "Analyzing logs..."
 
+      - name: Download Maven build log
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: maven-build-log
+          path: logs/
+
+      - name: Download Docker build log
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: docker-build-log
+          path: logs/
+
+      - name: Prepare consolidated log
+        run: |
+          set -euo pipefail
+          LOGFILE="ci-logs.txt"
+
+          if ls logs/*.log >/dev/null 2>&1; then
+            (
+              for f in logs/*.log; do
+                echo "===================="
+                echo "FILE: $f"
+                echo "===================="
+                cat "$f"
+                echo
+              done
+            ) > "$LOGFILE"
+          else
+            echo "No logs found" > "$LOGFILE"
+          fi
+
+          echo "----- CI logs (first 200 lines) -----"
+          head -n 200 "$LOGFILE" || true
+
+      - name: Install Copilot CLI
+        run: |
+          set -euo pipefail
+          export XDG_CONFIG_HOME=/tmp/copilot-config
+          mkdir -p /tmp/copilot-config
+
+          if ! command -v node >/dev/null 2>&1; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+          fi
+
+          mkdir -p ~/.npm-global
+          npm config set prefix '~/.npm-global'
+          npm install -g @github/copilot
+
+          NPM_BIN="$HOME/.npm-global/bin"
+          if [ -f "$NPM_BIN/copilot" ]; then
+            echo "✅ Copilot CLI installed successfully"
+            echo "$NPM_BIN" >> $GITHUB_PATH
+            "$NPM_BIN/copilot" --version
+          else
+            echo "❌ ERROR: Copilot CLI not found"
+            exit 1
+          fi
+
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y gh
+          fi
+          gh --version || true
+
+      - name: Analyze failure with Copilot (using repo prompt)
+        run: |
+          set -euo pipefail
+          export XDG_CONFIG_HOME=/tmp/copilot-config
+
+          echo "===== GitHub Copilot CLI: Analyzing CI failure ====="
+
+          {
+            cat .github/gh_copilot_prompts/copilot_ci_cd_error_analysis_prompts.md
+            echo ""
+            echo "================ CI LOGS ================"
+            cat ci-logs.txt
+          } > copilot-input.txt
+
+          copilot < copilot-input.txt
+
+      - name: Save analysis report
+        run: |
+          set -euo pipefail
+          export XDG_CONFIG_HOME=/tmp/copilot-config
+
+          {
+            cat .github/gh_copilot_prompts/copilot_ci_cd_error_analysis_prompts.md
+            echo ""
+            echo "================ CI LOGS ================"
+            cat ci-logs.txt
+          } > copilot-input.txt
+
+          copilot < copilot-input.txt > copilot-analysis.md
+
+          echo "## Copilot Failure Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          head -n 150 copilot-analysis.md >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Upload analysis report
+        uses: actions/upload-artifact@v4
+        with:
+          name: copilot-analysis
+          path: copilot-analysis.md
+          retention-days: 14
+
+  # Notify approver that deployment is ready for approval
   notify-for-approval:
     needs: build
-    if: success()
+    if: success() # Only notify if build and docker-build succeeded
     runs-on: ubuntu-latest
     steps:
       - name: Send Approval Request Email
@@ -93,17 +213,39 @@ jobs:
         with:
           server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
           server_port: 587
+          secure: false
+          starttls: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           to: Sai.Karthik@ust.com
-          subject: "⏰ URGENT: Approve Deployment in 3 Minutes"
+          from: GitHub Actions <no-reply@edge-ops.io>
+          subject: "⏰ URGENT: Approve Deployment in 3 Minutes - ${{ github.repository }}"
           body: |
-            ⚠️ MANUAL APPROVAL REQUIRED ⚠️
-            You have 3 MINUTES to approve the deployment here:
+            ⚠️  MANUAL APPROVAL REQUIRED - 3 MINUTE TIMEOUT ⚠️
+            
+            Repository: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Run Number: #${{ github.run_number }}
+            
+            Build Status: ✅ SUCCESS
+            Docker Build Status: ✅ SUCCESS
+            
+            ⏱️  You have 3 MINUTES to approve or reject this deployment.
+            
+            🔗 APPROVE OR REJECT HERE:
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            ⚠️  If you do NOT respond within 3 minutes:
+            - ❌ Deployment will be CANCELLED
+            - ❌ Workflow will be marked as FAILED
+            
+            Actions:
+            ✅ Click "Review pending deployments" → Select "Production" → "Approve and deploy"
+            ❌ Click "Review pending deployments" → Select "Production" → "Reject"
 
-  # NEW JOB: The 3-minute Bouncer
-  timeout-guard:
+
+    timeout-guard:
     needs: notify-for-approval
     runs-on: ubuntu-latest
     steps:
@@ -121,23 +263,111 @@ jobs:
             gh run cancel ${{ github.run_id }}
           fi
 
+
+  # Environment-gated deployment with 3-minute timeout
   deploy-to-production:
     needs: notify-for-approval
     runs-on: ubuntu-latest
     environment: 
       name: Production
+    # CRITICAL: 3-minute timeout - deployment fails if not approved in time
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download Docker artifacts (if needed)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: docker-build-log
+          path: logs/
+
       - name: Deploy to Production
         run: |
-          echo "🚀 Deployment approved and starting..."
-          # Your deployment commands here
-      - name: Health Check
-        run: echo "✅ Health check passed"
+          echo "🚀 Starting Deployment to Production..."
+          echo "Deployment approved at: $(date)"
+          echo "Run Number: ${{ github.run_number }}"
+          
+          # Example deployment commands:
+          # docker pull demo-app:${{ github.run_number }}
+          # docker stop my-app || true
+          # docker rm my-app || true
+          # docker run -d --name my-app -p 8080:8080 demo-app:${{ github.run_number }}
+          
+          # For Kubernetes:
+          # kubectl set image deployment/my-app my-app=demo-app:${{ github.run_number }}
+          # kubectl rollout status deployment/my-app
+          
+          echo "✅ Deployment Successful"
 
+      - name: Health Check
+        run: |
+          echo "🏥 Running health checks..."
+          # Add your health check commands here
+          # curl -f https://your-app.example.com/health || exit 1
+          echo "✅ Health check passed"
+
+      - name: Send Success Email
+        if: success()
+        uses: dawidd6/action-send-mail@v3
+        with: 
+          server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
+          server_port: 587
+          secure: false
+          starttls: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          to: Sai.Karthik@ust.com
+          from: GitHub Actions <no-reply@edge-ops.io>
+          subject: '✅ DEPLOYMENT SUCCESS - ${{ github.workflow }} - ${{ github.ref_name }}'
+          body: |
+            🎉 DEPLOYMENT TO PRODUCTION SUCCESSFUL 🎉
+            
+            Workflow: ${{ github.workflow }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Run Number: #${{ github.run_number }}
+            
+            Job Results:
+            ✅ Build: SUCCESS
+            ✅ Docker Build: SUCCESS
+            ✅ Deployment: SUCCESS
+            
+            Deployed At: $(date)
+            
+            🔗 Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            🌐 Application URL: https://your-app.example.com
+
+      - name: Send Failure Email
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with: 
+          server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
+          server_port: 587
+          secure: false
+          starttls: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          to: Sai.Karthik@ust.com
+          from: GitHub Actions <no-reply@edge-ops.io>
+          subject: '❌ DEPLOYMENT FAILED - ${{ github.workflow }} - ${{ github.ref_name }}'
+          body: |
+            ❌ DEPLOYMENT TO PRODUCTION FAILED ❌
+            
+            Workflow: ${{ github.workflow }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Run Number: #${{ github.run_number }}
+            
+            Failure Reason: Deployment steps failed
+            
+            🔗 View Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            Please investigate the deployment failure and take corrective action.
+
+  # Handle rejection or timeout scenarios
   deployment-failed-notification:
-    # Now waits for the guard and the deploy job
-    needs: [build, timeout-guard]
+    needs: [build, docker-build, deploy-to-production]
     if: failure() || cancelled()
     runs-on: ubuntu-latest
     steps:
@@ -145,22 +375,101 @@ jobs:
         id: failure_reason
         run: |
           DEPLOY_STATUS="${{ needs.deploy-to-production.result }}"
+          BUILD_STATUS="${{ needs.build.result }}"
+          DOCKER_STATUS="${{ needs.docker-build.result }}"
+          
           if [[ "$DEPLOY_STATUS" == "cancelled" ]]; then
             echo "reason=TIMEOUT - No approval within 3 minutes" >> $GITHUB_OUTPUT
-            echo "subject=⏰ DEPLOYMENT TIMEOUT" >> $GITHUB_OUTPUT
+            echo "subject=⏰ DEPLOYMENT TIMEOUT - Not Approved in Time" >> $GITHUB_OUTPUT
+          elif [[ "$DEPLOY_STATUS" == "failure" ]]; then
+            echo "reason=REJECTED - Deployment was rejected by approver" >> $GITHUB_OUTPUT
+            echo "subject=❌ DEPLOYMENT REJECTED" >> $GITHUB_OUTPUT
+          elif [[ "$BUILD_STATUS" == "failure" ]]; then
+            echo "reason=BUILD FAILED" >> $GITHUB_OUTPUT
+            echo "subject=❌ BUILD FAILED - Deployment Skipped" >> $GITHUB_OUTPUT
+          elif [[ "$DOCKER_STATUS" == "failure" ]]; then
+            echo "reason=DOCKER BUILD FAILED" >> $GITHUB_OUTPUT
+            echo "subject=❌ DOCKER BUILD FAILED - Deployment Skipped" >> $GITHUB_OUTPUT
           else
-            echo "reason=FAILED/REJECTED" >> $GITHUB_OUTPUT
+            echo "reason=UNKNOWN - Check workflow logs" >> $GITHUB_OUTPUT
             echo "subject=❌ DEPLOYMENT FAILED" >> $GITHUB_OUTPUT
           fi
-      - name: Send Final Email
+
+      - name: Download Copilot analysis (if exists)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: copilot-analysis
+          path: .
+
+      - name: Download Maven build log (if exists)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: maven-build-log
+          path: logs/
+
+      - name: Download Docker build log (if exists)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: docker-build-log
+          path: logs/
+
+      - name: Collect attachments list
+        id: collect_attachments
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=()
+          [[ -f copilot-analysis.md ]] && files+=("copilot-analysis.md")
+          [[ -f logs/maven.log ]] && files+=("logs/maven.log")
+          [[ -f logs/dockerbuild.log ]] && files+=("logs/dockerbuild.log")
+
+          printf '%s\n' "${files[@]}" > attachments_list.txt || true
+          echo "Attachments to send:"
+          cat attachments_list.txt || true
+
+          {
+            echo "attachments<<EOF"
+            cat attachments_list.txt || true
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Send Failure/Timeout/Rejection Email
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
           server_port: 587
+          secure: false
+          starttls: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           to: Sai.Karthik@ust.com
-          subject: "${{ steps.failure_reason.outputs.subject }}"
+          from: GitHub Actions <no-reply@edge-ops.io>
+          subject: '${{ steps.failure_reason.outputs.subject }} - ${{ github.workflow }}'
           body: |
-            Workflow Result: ${{ steps.failure_reason.outputs.reason }}
-            View details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            ❌ WORKFLOW FAILED ❌
+            
+            Workflow: ${{ github.workflow }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Run Number: #${{ github.run_number }}
+            
+            Failure Reason: ${{ steps.failure_reason.outputs.reason }}
+            
+            Job Status Summary:
+            - Build: ${{ needs.build.result }}
+            - Docker Build: ${{ needs.docker-build.result }}
+            - Deployment: ${{ needs.deploy-to-production.result }}
+            
+            🔗 Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            ${{ steps.failure_reason.outputs.reason == 'TIMEOUT - No approval within 3 minutes' && '⏰ The deployment was not approved within the 3-minute window and has been cancelled.' || '' }}
+            ${{ steps.failure_reason.outputs.reason == 'REJECTED - Deployment was rejected by approver' && '🚫 The deployment was explicitly rejected by an approver.' || '' }}
+            
+            Next Steps:
+            - Review the workflow logs for details
+            - Check attached build logs and analysis reports
+            - Fix any issues and re-run the workflow
+          attachments: ${{ steps.collect_attachments.outputs.attachments }}
