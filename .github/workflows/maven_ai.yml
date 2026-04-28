@@ -244,6 +244,22 @@ jobs:
             ✅ Click "Review pending deployments" → Select "Production" → "Approve and deploy"
             ❌ Click "Review pending deployments" → Select "Production" → "Reject"
 
+
+            timeout-guard:
+            needs: notify-for-approval
+            runs-on: ubuntu-latest
+            steps:
+              - name: Wait 3 minutes then cancel if not approved
+                run: |
+                  sleep 180
+                  # Check if the deployment is still 'waiting' or 'pending'
+                  STATUS=$(gh run view ${{ github.run_id }} --json status -q .status)
+                  if [[ "$STATUS" != "completed" ]]; then
+                    gh run cancel ${{ github.run_id }}
+                  fi
+                env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # Environment-gated deployment with 3-minute timeout
   deploy-to-production:
     needs: notify-for-approval
