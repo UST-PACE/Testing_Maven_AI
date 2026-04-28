@@ -245,20 +245,26 @@ jobs:
             ❌ Click "Review pending deployments" → Select "Production" → "Reject"
 
 
-        timeout-guard:
-              needs: notify-for-approval
-              runs-on: ubuntu-latest
-              steps:
-                - name: Wait 3 minutes then cancel if not approved
-                  run: |
-                    sleep 180
-                    # Check if the deployment is still 'waiting' or 'pending'
-                    STATUS=$(gh run view ${{ github.run_id }} --json status -q .status)
-                    if [[ "$STATUS" != "completed" ]]; then
-                      gh run cancel ${{ github.run_id }}
-                    fi
-                  env:
-                    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    timeout-guard:
+    needs: notify-for-approval
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait 3 minutes
+        run: sleep 180
+      - name: Auto-cancel if still pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Check if the workflow is still active
+          # 'gh run view' will show the status of the entire workflow run
+          RUN_STATUS=$(gh run view ${{ github.run_id }} --json status -q .status)
+          
+          if [[ "$RUN_STATUS" != "completed" ]]; then
+            echo "⏰ 3 minutes reached. No approval detected. Cancelling workflow..."
+            gh run cancel ${{ github.run_id }}
+          else
+            echo "✅ Workflow already completed or moved past pending."
+          fi
 
   # Environment-gated deployment with 3-minute timeout
   deploy-to-production:
