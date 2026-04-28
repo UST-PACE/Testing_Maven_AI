@@ -204,7 +204,7 @@ jobs:
 
   # Notify approver that deployment is ready for approval
   notify-for-approval:
-    needs: [build, docker-build]
+    needs: build
     if: success() # Only notify if build and docker-build succeeded
     runs-on: ubuntu-latest
     steps:
@@ -250,7 +250,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: 
       name: Production
-      url: https://your-app.example.com  # Update with your actual URL
     # CRITICAL: 3-minute timeout - deployment fails if not approved in time
     timeout-minutes: 3
     steps:
