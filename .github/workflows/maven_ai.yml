@@ -245,7 +245,7 @@ jobs:
             ❌ Click "Review pending deployments" → Select "Production" → "Reject"
 
 
-    timeout-guard:
+  timeout-guard:
     needs: notify-for-approval
     runs-on: ubuntu-latest
     steps:
