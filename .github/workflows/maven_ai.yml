@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest 
     container:
       image: maven:3.9.6-eclipse-temurin-17-alpine
     steps:
@@ -202,200 +202,12 @@ jobs:
           path: copilot-analysis.md
           retention-days: 14
 
-  # Notify approver that deployment is ready for approval
-  notify-for-approval:
-    needs: build
-    if: success() # Only notify if build and docker-build succeeded
+  email-notification:
     runs-on: ubuntu-latest
+    needs: [build, docker-build, analyze-failure-with-copilot]
+    if: always()
     steps:
-      - name: Send Approval Request Email
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
-          server_port: 587
-          secure: false
-          starttls: true
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
-          to: Sai.Karthik@ust.com
-          from: GitHub Actions <no-reply@edge-ops.io>
-          subject: "⏰ URGENT: Approve Deployment in 3 Minutes - ${{ github.repository }}"
-          body: |
-            ⚠️  MANUAL APPROVAL REQUIRED - 3 MINUTE TIMEOUT ⚠️
-            
-            Repository: ${{ github.repository }}
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Run Number: #${{ github.run_number }}
-            
-            Build Status: ✅ SUCCESS
-            Docker Build Status: ✅ SUCCESS
-            
-            ⏱️  You have 3 MINUTES to approve or reject this deployment.
-            
-            🔗 APPROVE OR REJECT HERE:
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            
-            ⚠️  If you do NOT respond within 3 minutes:
-            - ❌ Deployment will be CANCELLED
-            - ❌ Workflow will be marked as FAILED
-            
-            Actions:
-            ✅ Click "Review pending deployments" → Select "Production" → "Approve and deploy"
-            ❌ Click "Review pending deployments" → Select "Production" → "Reject"
-
-
-  timeout-guard:
-    needs: notify-for-approval
-    runs-on: ubuntu-latest
-    steps:
-      - name: Wait for 3 minutes
-        run: sleep 180
-      - name: Auto-cancel if not approved
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Check if the deployment job is still waiting
-          # If the workflow is not 'completed', we force cancel it
-          STATUS=$(gh run view ${{ github.run_id }} --json status -q .status)
-          if [[ "$STATUS" != "completed" ]]; then
-            echo "🛑 Time is up! Cancelling the workflow..."
-            gh run cancel ${{ github.run_id }}
-          fi
-
-
-  # Environment-gated deployment with 3-minute timeout
-  deploy-to-production:
-    needs: notify-for-approval
-    runs-on: ubuntu-latest
-    environment: 
-      name: Production
-    # CRITICAL: 3-minute timeout - deployment fails if not approved in time
-    timeout-minutes: 3
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download Docker artifacts (if needed)
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: docker-build-log
-          path: logs/
-
-      - name: Deploy to Production
-        run: |
-          echo "🚀 Starting Deployment to Production..."
-          echo "Deployment approved at: $(date)"
-          echo "Run Number: ${{ github.run_number }}"
-          
-          # Example deployment commands:
-          # docker pull demo-app:${{ github.run_number }}
-          # docker stop my-app || true
-          # docker rm my-app || true
-          # docker run -d --name my-app -p 8080:8080 demo-app:${{ github.run_number }}
-          
-          # For Kubernetes:
-          # kubectl set image deployment/my-app my-app=demo-app:${{ github.run_number }}
-          # kubectl rollout status deployment/my-app
-          
-          echo "✅ Deployment Successful"
-
-      - name: Health Check
-        run: |
-          echo "🏥 Running health checks..."
-          # Add your health check commands here
-          # curl -f https://your-app.example.com/health || exit 1
-          echo "✅ Health check passed"
-
-      - name: Send Success Email
-        if: success()
-        uses: dawidd6/action-send-mail@v3
-        with: 
-          server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
-          server_port: 587
-          secure: false
-          starttls: true
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
-          to: Sai.Karthik@ust.com
-          from: GitHub Actions <no-reply@edge-ops.io>
-          subject: '✅ DEPLOYMENT SUCCESS - ${{ github.workflow }} - ${{ github.ref_name }}'
-          body: |
-            🎉 DEPLOYMENT TO PRODUCTION SUCCESSFUL 🎉
-            
-            Workflow: ${{ github.workflow }}
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Run Number: #${{ github.run_number }}
-            
-            Job Results:
-            ✅ Build: SUCCESS
-            ✅ Docker Build: SUCCESS
-            ✅ Deployment: SUCCESS
-            
-            Deployed At: $(date)
-            
-            🔗 Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            🌐 Application URL: https://your-app.example.com
-
-      - name: Send Failure Email
-        if: failure()
-        uses: dawidd6/action-send-mail@v3
-        with: 
-          server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
-          server_port: 587
-          secure: false
-          starttls: true
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
-          to: Sai.Karthik@ust.com
-          from: GitHub Actions <no-reply@edge-ops.io>
-          subject: '❌ DEPLOYMENT FAILED - ${{ github.workflow }} - ${{ github.ref_name }}'
-          body: |
-            ❌ DEPLOYMENT TO PRODUCTION FAILED ❌
-            
-            Workflow: ${{ github.workflow }}
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Run Number: #${{ github.run_number }}
-            
-            Failure Reason: Deployment steps failed
-            
-            🔗 View Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            
-            Please investigate the deployment failure and take corrective action.
-
-  # Handle rejection or timeout scenarios
-  deployment-failed-notification:
-    needs: [build, docker-build, deploy-to-production]
-    if: failure() || cancelled()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Determine Failure Reason
-        id: failure_reason
-        run: |
-          DEPLOY_STATUS="${{ needs.deploy-to-production.result }}"
-          BUILD_STATUS="${{ needs.build.result }}"
-          DOCKER_STATUS="${{ needs.docker-build.result }}"
-          
-          if [[ "$DEPLOY_STATUS" == "cancelled" ]]; then
-            echo "reason=TIMEOUT - No approval within 3 minutes" >> $GITHUB_OUTPUT
-            echo "subject=⏰ DEPLOYMENT TIMEOUT - Not Approved in Time" >> $GITHUB_OUTPUT
-          elif [[ "$DEPLOY_STATUS" == "failure" ]]; then
-            echo "reason=REJECTED - Deployment was rejected by approver" >> $GITHUB_OUTPUT
-            echo "subject=❌ DEPLOYMENT REJECTED" >> $GITHUB_OUTPUT
-          elif [[ "$BUILD_STATUS" == "failure" ]]; then
-            echo "reason=BUILD FAILED" >> $GITHUB_OUTPUT
-            echo "subject=❌ BUILD FAILED - Deployment Skipped" >> $GITHUB_OUTPUT
-          elif [[ "$DOCKER_STATUS" == "failure" ]]; then
-            echo "reason=DOCKER BUILD FAILED" >> $GITHUB_OUTPUT
-            echo "subject=❌ DOCKER BUILD FAILED - Deployment Skipped" >> $GITHUB_OUTPUT
-          else
-            echo "reason=UNKNOWN - Check workflow logs" >> $GITHUB_OUTPUT
-            echo "subject=❌ DEPLOYMENT FAILED" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Download Copilot analysis (if exists)
+      - name: Download Copilot analysis report (if exists)
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -415,6 +227,41 @@ jobs:
         with:
           name: docker-build-log
           path: logs/
+
+      - name: Determine Workflow Status
+        id: check_status
+        run: |
+          set -euo pipefail
+          BUILD_STATUS="${{ needs.build.result }}"
+          DOCKER_STATUS="${{ needs.docker-build.result }}"
+          ANALYZE_STATUS="${{ needs.analyze-failure-with-copilot.result }}"
+
+          if [[ "$BUILD_STATUS" == "failure" || "$DOCKER_STATUS" == "failure" || "$ANALYZE_STATUS" == "failure" ]]; then
+            echo "WORKFLOW_STATUS=failure" >> $GITHUB_OUTPUT
+            echo "EMAIL_SUBJECT_STATUS=failed" >> $GITHUB_OUTPUT
+          else
+            echo "WORKFLOW_STATUS=success" >> $GITHUB_OUTPUT
+            echo "EMAIL_SUBJECT_STATUS=succeeded" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine Email Recipient
+        id: determine_recipient
+        run: |
+          set -euo pipefail
+          RECIPIENT=""
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            if [[ -n "${{ github.event.pusher.email }}" ]]; then
+              RECIPIENT="${{ github.event.pusher.email }}"
+            fi
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ -n "${{ github.event.pull_request.user.email }}" ]]; then
+              RECIPIENT="${{ github.event.pull_request.user.email }}"
+            fi
+          fi
+          if [[ -z "$RECIPIENT" ]]; then
+            RECIPIENT="${{ secrets.MAIL_RECIPIENT }}"
+          fi
+          echo "email_to=$RECIPIENT" >> $GITHUB_OUTPUT
 
       - name: Collect attachments list
         id: collect_attachments
@@ -436,40 +283,72 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Send Failure/Timeout/Rejection Email
+
+        
+
+  # 1. Notify the approver that a deployment is pending
+  notify-for-approval:
+    needs: build
+    if: success() # Only notify if the build and docker jobs passed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Approval Request Email
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
           server_port: 587
-          secure: false
-          starttls: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           to: Sai.Karthik@ust.com
           from: GitHub Actions <no-reply@edge-ops.io>
-          subject: '${{ steps.failure_reason.outputs.subject }} - ${{ github.workflow }}'
+          subject: "Manual Approval Needed: Deploying ${{ github.repository }} to Production"
           body: |
-            ❌ WORKFLOW FAILED ❌
-            
+            The build for run #${{ github.run_number }} was successful.
+            Please approve the deployment to Production here:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # 2. The Environment Gate + Deployment
+  deploy-to-production:
+    needs: notify-for-approval
+    runs-on: ubuntu-latest
+    environment: Production  
+    # Optional: Fail the job if not approved within 2 hours
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Container (Example)
+        run: |
+          echo "🚀 Starting Deployment to Production..."
+          # Example: Deploying via SSH or Kubernetes
+          # docker pull demo-app:${{ github.run_number }}
+          # docker stop my-app || true
+          # docker run -d --name my-app demo-app:${{ github.run_number }}
+          echo "✅ Deployment Successful"
+              
+      - name: Send email notification
+        uses: dawidd6/action-send-mail@v3
+        with: 
+          server_address: ${{ secrets.MAIL_SERVER_ADDRESS }}
+          server_port: 587
+          secure: false     # STARTTLS mode for port 587
+          starttls: true    # upgrade to TLS after EHLO
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          to: Sai.Karthik@ust.com
+          from: GitHub Actions <no-reply@edge-ops.io>
+          subject: '[GitHub Actions] Workflow ${{ github.workflow }} (branch ${{ github.ref_name }}) - ${{ steps.check_status.outputs.EMAIL_SUBJECT_STATUS }}'
+          body: |
             Workflow: ${{ github.workflow }}
             Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}
-            Run Number: #${{ github.run_number }}
-            
-            Failure Reason: ${{ steps.failure_reason.outputs.reason }}
-            
-            Job Status Summary:
-            - Build: ${{ needs.build.result }}
-            - Docker Build: ${{ needs.docker-build.result }}
-            - Deployment: ${{ needs.deploy-to-production.result }}
-            
-            🔗 Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            
-            ${{ steps.failure_reason.outputs.reason == 'TIMEOUT - No approval within 3 minutes' && '⏰ The deployment was not approved within the 3-minute window and has been cancelled.' || '' }}
-            ${{ steps.failure_reason.outputs.reason == 'REJECTED - Deployment was rejected by approver' && '🚫 The deployment was explicitly rejected by an approver.' || '' }}
-            
-            Next Steps:
-            - Review the workflow logs for details
-            - Check attached build logs and analysis reports
-            - Fix any issues and re-run the workflow
+            Build Job Status: ${{ needs.build.result }}
+            Docker Build Job Status: ${{ needs.docker-build.result }}
+            Failure Analysis Job Status: ${{ needs.analyze-failure-with-copilot.result }}
+            Overall Workflow Status: ${{ steps.check_status.outputs.WORKFLOW_STATUS }}
+            Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Notes:
+            - If the run failed, see the attached 'copilot-analysis.md'.
+            - Build logs are attached when available.
           attachments: ${{ steps.collect_attachments.outputs.attachments }}
